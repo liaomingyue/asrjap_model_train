@@ -102,15 +102,30 @@ class ModelscopeASRDataset(Dataset):
         self.kwargs = kwargs
         
         # 加载数据集
+        # 注意：MsDataset.load() 不支持 streaming 参数，因此不传递该参数
         logging.info(f"正在加载数据集: {dataset_name}, 子集: {subset_name}, 分割: {split}")
         MsDataset = _get_msdataset()  # 延迟导入，避免版本冲突
-        self.dataset = MsDataset.load(
-            dataset_name,
-            subset_name=subset_name,
-            split=split,
-            streaming=streaming,
-            cache_dir=cache_dir
-        )
+        
+        # MsDataset.load() 不支持 streaming 参数，因此不传递
+        # 数据集的流式处理由后续的数据访问方式决定
+        try:
+            self.dataset = MsDataset.load(
+                dataset_name,
+                subset_name=subset_name,
+                split=split,
+                cache_dir=cache_dir
+            )
+        except TypeError as e:
+            # 如果仍然出现参数错误，尝试不传递 subset_name
+            if "unexpected keyword argument" in str(e):
+                logging.warning(f"加载数据集时出现参数错误: {e}，尝试使用简化参数...")
+                self.dataset = MsDataset.load(
+                    dataset_name,
+                    split=split,
+                    cache_dir=cache_dir
+                )
+            else:
+                raise
         
         # 如果不是流式加载，转换为列表
         if not streaming:
@@ -119,7 +134,7 @@ class ModelscopeASRDataset(Dataset):
             logging.info(f"数据集加载完成，共 {len(self.data_list)} 条数据")
         else:
             self.data_list = None
-            logging.info("使用流式数据集加载模式")
+            logging.info("使用流式数据集加载模式（数据将在访问时动态加载）")
     
     def __len__(self):
         """返回数据集大小"""

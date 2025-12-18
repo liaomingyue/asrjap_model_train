@@ -203,14 +203,36 @@ class ModelscopeASRDataset(Dataset):
             raw_data = list(self.dataset.skip(idx).take(1))[0]
         
         # 将原始数据转换为模型所需的格式
-        # 假设原始数据包含 'audio' 和 'text' 字段
-        # 根据实际数据集结构调整
-        audio_path = raw_data.get('audio', None) or raw_data.get('audio:FILE', None)
-        text = raw_data.get('text', None) or raw_data.get('sentence', None) or raw_data.get('transcription', None)
+        # 尝试多种可能的字段名，以适配不同的数据集格式
+        audio_path = None
+        text = None
         
+        # 尝试多种音频字段名
+        audio_keys = ['audio', 'audio:FILE', 'audio_file', 'audio_path', 'path', 'file', 'wav', 'wav_file']
+        for key in audio_keys:
+            if key in raw_data and raw_data[key] is not None:
+                audio_path = raw_data[key]
+                break
+        
+        # 如果 audio_path 是字典，尝试从中提取路径
+        if isinstance(audio_path, dict):
+            audio_path = audio_path.get('path', None) or audio_path.get('file', None)
+        
+        # 尝试多种文本字段名
+        text_keys = ['text', 'sentence', 'transcription', 'transcript', 'label', 'target', 'output']
+        for key in text_keys:
+            if key in raw_data and raw_data[key] is not None:
+                text = raw_data[key]
+                break
+        
+        # 如果仍然找不到必要字段，记录详细信息并跳过
         if audio_path is None or text is None:
-            logging.warning(f"数据 {idx} 缺少必要字段: audio={audio_path}, text={text}")
-            # 返回空数据或跳过
+            available_keys = list(raw_data.keys()) if isinstance(raw_data, dict) else "非字典类型"
+            logging.warning(
+                f"数据 {idx} 缺少必要字段: audio={audio_path}, text={text}, "
+                f"可用字段: {available_keys}"
+            )
+            # 返回 None，由 collate_fn 过滤
             return None
         
         # 构建模型所需的数据格式

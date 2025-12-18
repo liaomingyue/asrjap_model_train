@@ -6,6 +6,7 @@
 import argparse
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -55,6 +56,83 @@ def cleanup_distributed():
     """清理分布式训练环境"""
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def save_checkpoint(checkpoint_path, checkpoint_data, max_retries=3):
+    """
+    保存检查点，包含错误处理和重试机制
+    
+    Args:
+        checkpoint_path: 检查点保存路径
+        checkpoint_data: 要保存的数据字典
+        max_retries: 最大重试次数
+        
+    Returns:
+        bool: 保存是否成功
+    """
+    # 确保输出目录存在
+    output_dir = os.path.dirname(checkpoint_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # 检查磁盘空间（如果可能）
+    try:
+        stat = shutil.disk_usage(output_dir if output_dir else os.getcwd())
+        free_space_gb = stat.free / (1024 ** 3)
+        if free_space_gb < 1.0:  # 小于 1GB
+            logger.warning(f"磁盘空间不足: {free_space_gb:.2f} GB 可用")
+    except Exception as e:
+        logger.warning(f"无法检查磁盘空间: {e}")
+    
+    # 尝试保存，带重试机制
+    for attempt in range(max_retries):
+        try:
+            # 先保存到临时文件，然后重命名（原子操作）
+            temp_path = checkpoint_path + ".tmp"
+            
+            # 如果临时文件存在，先删除
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            
+            # 保存到临时文件
+            torch.save(checkpoint_data, temp_path)
+            
+            # 如果目标文件存在，先删除
+            if os.path.exists(checkpoint_path):
+                os.remove(checkpoint_path)
+            
+            # 重命名为最终文件（原子操作）
+            os.rename(temp_path, checkpoint_path)
+            
+            logger.info(f"成功保存检查点: {checkpoint_path}")
+            return True
+            
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "file write failed" in error_msg or "unexpected pos" in error_msg:
+                logger.error(f"保存检查点时发生文件写入错误 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    # 等待一段时间后重试
+                    import time
+                    time.sleep(2 ** attempt)  # 指数退避
+                    continue
+                else:
+                    logger.error(f"保存检查点失败，已达到最大重试次数: {checkpoint_path}")
+                    return False
+            else:
+                # 其他运行时错误直接抛出
+                raise
+        except Exception as e:
+            logger.error(f"保存检查点时发生未知错误 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2 ** attempt)
+                continue
+            else:
+                logger.error(f"保存检查点失败: {checkpoint_path}")
+                return False
+    
+    return False
 
 
 def train_epoch(
@@ -338,7 +416,7 @@ def main():
                 logger.info(f"保存最佳模型 (验证损失: {val_loss:.4f})")
                 if rank == 0:  # 只在主进程保存
                     checkpoint_path = os.path.join(args.output_dir, "best_model.pt")
-                    torch.save({
+                    checkpoint_data = {
                         'epoch': epoch,
                         'model_state_dict': model_module.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
@@ -346,29 +424,33 @@ def main():
                         'val_loss': val_loss,
                         'train_acc': train_acc,
                         'val_acc': val_acc,
-                    }, checkpoint_path)
+                    }
+                    if not save_checkpoint(checkpoint_path, checkpoint_data):
+                        logger.error("保存最佳模型失败，但训练将继续进行")
         
         # 定期保存检查点
         if epoch % (args.save_steps // len(train_dataloader) + 1) == 0 and rank == 0:
             checkpoint_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}.pt")
-            torch.save({
+            checkpoint_data = {
                 'epoch': epoch,
                 'model_state_dict': model_module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss,
-            }, checkpoint_path)
-            logger.info(f"保存检查点: {checkpoint_path}")
+            }
+            if not save_checkpoint(checkpoint_path, checkpoint_data):
+                logger.error(f"保存检查点失败: {checkpoint_path}")
     
     logger.info("训练完成！")
     
     # 保存最终模型
     if rank == 0:
         final_path = os.path.join(args.output_dir, "final_model.pt")
-        torch.save({
+        checkpoint_data = {
             'model_state_dict': model_module.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-        }, final_path)
-        logger.info(f"保存最终模型: {final_path}")
+        }
+        if not save_checkpoint(final_path, checkpoint_data):
+            logger.error("保存最终模型失败")
     
     # 清理分布式训练
     cleanup_distributed()

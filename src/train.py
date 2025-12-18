@@ -253,6 +253,10 @@ def main():
     if tokenizer is None or frontend is None:
         logger.warning("未找到 tokenizer 或 frontend，将使用默认配置")
     
+    # 从 kwargs 中移除已明确传递的参数，避免重复参数错误
+    dataset_kwargs = {k: v for k, v in kwargs.items() 
+                     if k not in ["model", "tokenizer", "frontend"]}
+    
     # 创建数据集
     logger.info("正在创建训练数据集...")
     train_dataset = create_dataset(
@@ -264,7 +268,7 @@ def main():
         tokenizer=tokenizer,
         frontend=frontend,
         model=model_module,
-        **kwargs
+        **dataset_kwargs
     )
     
     train_dataloader = train_dataset.get_dataloader(
@@ -287,7 +291,7 @@ def main():
                 tokenizer=tokenizer,
                 frontend=frontend,
                 model=model_module,
-                **kwargs
+                **dataset_kwargs
             )
             val_dataloader = val_dataset.get_dataloader(
                 batch_size=args.batch_size,

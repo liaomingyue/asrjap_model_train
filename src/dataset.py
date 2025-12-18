@@ -4,6 +4,8 @@ Modelscope 数据集加载器
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Union
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -95,6 +97,18 @@ class ModelscopeASRDataset(Dataset):
         self.subset_name = subset_name
         self.split = split
         self.streaming = streaming
+        
+        # 将 cache_dir 转换为绝对路径，并确保目录存在
+        if cache_dir:
+            cache_dir = os.path.abspath(cache_dir)
+            os.makedirs(cache_dir, exist_ok=True)
+            logging.info(f"使用缓存目录: {cache_dir}")
+        else:
+            # 如果未指定 cache_dir，使用默认值
+            cache_dir = os.path.abspath("data")
+            os.makedirs(cache_dir, exist_ok=True)
+            logging.info(f"使用默认缓存目录: {cache_dir}")
+        
         self.cache_dir = cache_dir
         self.tokenizer = tokenizer
         self.frontend = frontend
@@ -115,16 +129,43 @@ class ModelscopeASRDataset(Dataset):
                 split=split,
                 cache_dir=cache_dir
             )
-        except TypeError as e:
-            # 如果仍然出现参数错误，尝试不传递 subset_name
-            if "unexpected keyword argument" in str(e):
+        except (TypeError, FileNotFoundError) as e:
+            error_msg = str(e)
+            # 如果出现参数错误，尝试不传递 subset_name
+            if "unexpected keyword argument" in error_msg:
                 logging.warning(f"加载数据集时出现参数错误: {e}，尝试使用简化参数...")
-                self.dataset = MsDataset.load(
-                    dataset_name,
-                    split=split,
-                    cache_dir=cache_dir
-                )
+                try:
+                    self.dataset = MsDataset.load(
+                        dataset_name,
+                        split=split,
+                        cache_dir=cache_dir
+                    )
+                except Exception as e2:
+                    logging.warning(f"使用简化参数仍然失败: {e2}，尝试不指定 cache_dir...")
+                    # 最后尝试不指定 cache_dir
+                    self.dataset = MsDataset.load(
+                        dataset_name,
+                        subset_name=subset_name,
+                        split=split
+                    )
+            # 如果出现文件路径错误，尝试不指定 cache_dir
+            elif "No such file or directory" in error_msg or "FileNotFoundError" in str(type(e)):
+                logging.warning(f"缓存目录路径错误: {e}，尝试不指定 cache_dir...")
+                try:
+                    self.dataset = MsDataset.load(
+                        dataset_name,
+                        subset_name=subset_name,
+                        split=split
+                    )
+                except Exception as e2:
+                    logging.warning(f"不指定 cache_dir 仍然失败: {e2}，尝试最简参数...")
+                    # 最后尝试最简参数
+                    self.dataset = MsDataset.load(
+                        dataset_name,
+                        split=split
+                    )
             else:
+                # 其他错误直接抛出
                 raise
         
         # 如果不是流式加载，转换为列表

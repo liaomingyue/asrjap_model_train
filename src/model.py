@@ -241,10 +241,25 @@ class FunASRNano(nn.Module):
         stats["dialog_turns_avg"] = dialog_turns_avg
 
         # force_gatherable: 为DataParallel将标量转换为设备和张量
+        # 注意：force_gatherable が損失テンソルの勾配を失う可能性があるため、
+        # 元の損失テンソルを保持してから force_gatherable を適用
         if self.length_normalized_loss:
             batch_size = int((labels_ids > 0 + 1).sum())
-        loss, stats, weight = force_gatherable((loss, stats, batch_size), loss.device)
-        return loss, stats, weight
+        
+        # 元の損失テンソルを保持（勾配情報を保持）
+        original_loss = loss
+        
+        # force_gatherable を適用（統計情報と重みの処理）
+        loss_gathered, stats, weight = force_gatherable((loss, stats, batch_size), loss.device)
+        
+        # 勾配が必要な場合は、元の損失テンソルを使用
+        # force_gatherable の結果は統計情報の収集にのみ使用
+        if original_loss.requires_grad:
+            # 元の損失テンソルを返す（勾配情報を保持）
+            return original_loss, stats, weight
+        else:
+            # 勾配が不要な場合は、gathered された損失を返す
+            return loss_gathered, stats, weight
 
     def forward_export(self, speech, speech_lengths, **kwargs):
         x, olens = self.audio_encoder(speech, speech_lengths)

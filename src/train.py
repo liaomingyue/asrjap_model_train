@@ -241,6 +241,12 @@ def train_epoch(
         # 前向传播
         loss, stats, weight = model(**batch)
         
+        # 损失が勾配を必要とすることを確認
+        if not loss.requires_grad:
+            logger.warning(f"批次 {batch_idx}: 损失テンソルが勾配を必要としません。requires_grad={loss.requires_grad}, grad_fn={loss.grad_fn}")
+            # 損失が勾配を必要としない場合、スキップ
+            continue
+        
         # 梯度累积
         loss = loss / accumulation_steps
         loss.backward()

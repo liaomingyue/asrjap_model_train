@@ -358,16 +358,116 @@ class ModelscopeASRDataset(Dataset):
             合并后的批次数据
         """
         # 合并 speech
-        speeches = [b["speech"] for b in batch if len(b.get("speech", [])) > 0]
+        speeches = []
+        speech_lengths_list = []
+        
+        for b in batch:
+            if len(b.get("speech", [])) > 0:
+                speeches.append(b["speech"])
+                # speech_lengths の処理：テンソルの場合は形状を確認して適切に処理
+                sl = b.get("speech_lengths", None)
+                if sl is not None:
+                    if isinstance(sl, torch.Tensor):
+                        if len(sl.shape) > 0 and sl.shape[0] > 0:
+                            # [批次, ...] の形状の場合、最初の要素を取得
+                            speech_lengths_list.append(sl[0])
+                        else:
+                            # スカラーの場合
+                            speech_lengths_list.append(sl)
+                    else:
+                        # リストやその他の型の場合
+                        speech_lengths_list.append(torch.tensor(sl[0] if isinstance(sl, (list, tuple)) else sl, dtype=torch.int64))
+                else:
+                    # speech_lengths が存在しない場合、speech の長さから推定
+                    s = b["speech"]
+                    if len(s.shape) >= 2:
+                        speech_lengths_list.append(torch.tensor(s.shape[0] if len(s.shape) == 2 else s.shape[1], dtype=torch.int64))
+                    else:
+                        speech_lengths_list.append(torch.tensor(0, dtype=torch.int64))
+        
         if len(speeches) > 0:
-            speech = torch.nn.utils.rnn.pad_sequence(
-                speeches, batch_first=True, padding_value=0.0
-            )
-            speech_lengths = torch.stack([
-                b["speech_lengths"][0] if len(b.get("speech", [])) > 0 
-                else torch.tensor([0], dtype=torch.int64) 
-                for b in batch
-            ])
+            try:
+                # 检查所有 speech テンソルの形状
+                shapes = [s.shape for s in speeches]
+                feature_dims = [s.shape[-1] if len(s.shape) > 1 else 1 for s in speeches]
+                
+                # 如果特徴次元が異なる場合、最大次元に合わせてパディング
+                max_feature_dim = max(feature_dims)
+                min_feature_dim = min(feature_dims)
+                
+                if max_feature_dim != min_feature_dim:
+                    logging.warning(
+                        f"检测到批次中 speech 特征维度不一致: {feature_dims}，"
+                        f"将统一到最大维度: {max_feature_dim}"
+                    )
+                    # 各 speech テンソルを最大特徴次元にパディング
+                    padded_speeches = []
+                    for s in speeches:
+                        current_feature_dim = s.shape[-1] if len(s.shape) > 1 else 1
+                        if current_feature_dim < max_feature_dim:
+                            # 特徴次元をパディング
+                            pad_size = max_feature_dim - current_feature_dim
+                            if len(s.shape) == 2:
+                                # [时间, 特征] -> [时间, 最大特征]
+                                padding = torch.zeros(s.shape[0], pad_size, dtype=s.dtype, device=s.device)
+                                s = torch.cat([s, padding], dim=1)
+                            elif len(s.shape) == 3:
+                                # [批次, 时间, 特征] -> [批次, 时间, 最大特征]
+                                # 通常は [1, 时间, 特征] の形状
+                                if s.shape[0] == 1:
+                                    # [1, 时间, 特征] -> [时间, 最大特征]
+                                    s = s[0]  # [时间, 特征]
+                                    padding = torch.zeros(s.shape[0], pad_size, dtype=s.dtype, device=s.device)
+                                    s = torch.cat([s, padding], dim=1)
+                                else:
+                                    padding = torch.zeros(s.shape[0], s.shape[1], pad_size, dtype=s.dtype, device=s.device)
+                                    s = torch.cat([s, padding], dim=2)
+                            else:
+                                logging.error(f"不支持的 speech 形状: {s.shape}")
+                                raise ValueError(f"不支持的 speech 形状: {s.shape}")
+                        padded_speeches.append(s)
+                    speeches = padded_speeches
+                
+                # すべての speech テンソルを [时间, 特征] の形状に統一
+                speeches_for_pad = []
+                for s in speeches:
+                    if len(s.shape) == 3:
+                        # [批次, 时间, 特征] -> [时间, 特征]
+                        if s.shape[0] == 1:
+                            s = s[0]  # [时间, 特征]
+                        else:
+                            # 複数のバッチがある場合、最初のものを使用（通常は発生しない）
+                            logging.warning(f"意外的 speech 形状: {s.shape}，使用第一个批次")
+                            s = s[0]
+                    elif len(s.shape) == 2:
+                        # すでに [时间, 特征] の形式
+                        pass
+                    else:
+                        raise ValueError(f"不支持的 speech 形状: {s.shape}")
+                    speeches_for_pad.append(s)
+                
+                # すべての speech テンソルが同じ特徴次元を持つことを確認
+                final_feature_dims = [s.shape[-1] for s in speeches_for_pad]
+                if len(set(final_feature_dims)) > 1:
+                    raise ValueError(f"特征维度仍然不一致: {final_feature_dims}, 形状: {[s.shape for s in speeches_for_pad]}")
+                
+                # pad_sequence を使用して時間次元をパディング
+                # 入力は [时间, 特征] のリストで、出力は [批次, 时间, 特征]
+                speech = torch.nn.utils.rnn.pad_sequence(
+                    speeches_for_pad, batch_first=True, padding_value=0.0
+                )
+                
+                # speech_lengths をスタック
+                if len(speech_lengths_list) > 0:
+                    speech_lengths = torch.stack(speech_lengths_list)
+                else:
+                    speech_lengths = torch.tensor([], dtype=torch.int64)
+                
+            except Exception as e:
+                logging.error(f"合并 speech 时发生错误: {e}")
+                logging.error(f"Speech 形状: {[s.shape for s in speeches]}")
+                logging.error(f"Speech lengths: {speech_lengths_list}")
+                raise
         else:
             speech = []
             speech_lengths = []

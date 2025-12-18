@@ -481,9 +481,11 @@ class ModelscopeASRDataset(Dataset):
             fbank_masks = [b["fbank_mask"] for b in batch]
             if len(fbank_masks) > 0:
                 # 形状を確認: 通常は [1, トークン長]
+                shapes_before = [m.shape for m in fbank_masks]
                 max_fbank_mask_len = max(m.shape[-1] if len(m.shape) > 1 else len(m) for m in fbank_masks)
                 padded_fbank_masks = []
-                for m in fbank_masks:
+                for idx, m in enumerate(fbank_masks):
+                    original_shape = m.shape
                     if len(m.shape) == 2:
                         # [1, トークン長] の形状
                         if m.shape[1] < max_fbank_mask_len:
@@ -497,7 +499,18 @@ class ModelscopeASRDataset(Dataset):
                             m = torch.cat([m, padding], dim=0)
                         padded_fbank_masks.append(m[None, :])  # [1, トークン長] に変換
                     else:
+                        logging.warning(f"fbank_mask 形状异常: {m.shape}，直接使用")
                         padded_fbank_masks.append(m)
+                
+                # パディング後の形状を確認
+                shapes_after = [m.shape for m in padded_fbank_masks]
+                if len(set(m.shape[1] if len(m.shape) > 1 else m.shape[0] for m in padded_fbank_masks)) > 1:
+                    logging.error(f"fbank_mask パディング後も形状が一致しません:")
+                    logging.error(f"  パディング前: {shapes_before}")
+                    logging.error(f"  パディング後: {shapes_after}")
+                    logging.error(f"  最大長: {max_fbank_mask_len}")
+                    raise ValueError(f"fbank_mask パディング失敗: 形状不一致")
+                
                 fbank_mask = torch.cat(padded_fbank_masks, dim=0)
             else:
                 fbank_mask = torch.tensor([], dtype=torch.float32)
@@ -682,12 +695,27 @@ class ModelscopeASRDataset(Dataset):
             
         except Exception as e:
             logging.error(f"合并张量时发生错误: {e}")
+            logging.error(f"错误类型: {type(e).__name__}")
             logging.error(f"批次大小: {len(batch)}")
             if len(batch) > 0:
                 logging.error(f"第一个样本的键: {list(batch[0].keys())}")
                 for key in batch[0].keys():
                     if isinstance(batch[0][key], torch.Tensor):
-                        logging.error(f"  {key}: {batch[0][key].shape}")
+                        logging.error(f"  {key}: {batch[0][key].shape}, dtype={batch[0][key].dtype}")
+                    else:
+                        logging.error(f"  {key}: {type(batch[0][key])}")
+                
+                # すべてのサンプルの形状を確認
+                logging.error("所有样本的形状:")
+                for idx, b in enumerate(batch):
+                    if "fbank_mask" in b:
+                        logging.error(f"  样本 {idx}: fbank_mask={b['fbank_mask'].shape}")
+                    if "input_ids" in b:
+                        logging.error(f"  样本 {idx}: input_ids={b['input_ids'].shape}")
+                    if "attention_mask" in b:
+                        logging.error(f"  样本 {idx}: attention_mask={b['attention_mask'].shape}")
+            import traceback
+            logging.error(f"完整错误堆栈:\n{traceback.format_exc()}")
             raise
         
         merged = {

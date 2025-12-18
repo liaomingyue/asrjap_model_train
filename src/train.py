@@ -70,6 +70,10 @@ def save_checkpoint(checkpoint_path, checkpoint_data, max_retries=3):
     Returns:
         bool: 保存是否成功
     """
+    # 元のデータを保持するためにコピーを作成
+    original_checkpoint_data = checkpoint_data
+    current_checkpoint_data = checkpoint_data
+    
     # 确保输出目录存在
     output_dir = os.path.dirname(checkpoint_path)
     if output_dir:
@@ -92,32 +96,96 @@ def save_checkpoint(checkpoint_path, checkpoint_data, max_retries=3):
             
             # 如果临时文件存在，先删除
             if os.path.exists(temp_path):
-                os.remove(temp_path)
+                try:
+                    os.remove(temp_path)
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败: {e}")
             
-            # 保存到临时文件
-            torch.save(checkpoint_data, temp_path)
+            # 保存前に、モデル状態をCPUに移動してメモリを節約
+            # これは大きなモデルの場合にメモリ不足を防ぐため
+            checkpoint_data_cpu = {}
+            for key, value in current_checkpoint_data.items():
+                if isinstance(value, torch.Tensor):
+                    checkpoint_data_cpu[key] = value.cpu().clone()
+                elif isinstance(value, dict):
+                    # ネストされた辞書（model_state_dictなど）を処理
+                    checkpoint_data_cpu[key] = {}
+                    for sub_key, sub_value in value.items():
+                        if isinstance(sub_value, torch.Tensor):
+                            checkpoint_data_cpu[key][sub_key] = sub_value.cpu().clone()
+                        else:
+                            checkpoint_data_cpu[key][sub_key] = sub_value
+                else:
+                    checkpoint_data_cpu[key] = value
+            
+            # 保存前に明示的にガベージコレクションを実行
+            import gc
+            gc.collect()
+            
+            # 保存到临时文件（使用pickle协议4以提高兼容性）
+            torch.save(checkpoint_data_cpu, temp_path, _use_new_zipfile_serialization=False)
+            
+            # ファイルシステムの同期を確実にする
+            if hasattr(os, 'sync'):
+                os.sync()
+            
+            # 临时文件が正常に作成されたか確認
+            if not os.path.exists(temp_path):
+                raise RuntimeError("临时文件创建失败")
+            
+            # ファイルサイズを確認
+            file_size = os.path.getsize(temp_path)
+            if file_size == 0:
+                raise RuntimeError("临时文件大小为0")
             
             # 如果目标文件存在，先删除
             if os.path.exists(checkpoint_path):
-                os.remove(checkpoint_path)
+                try:
+                    os.remove(checkpoint_path)
+                except Exception as e:
+                    logger.warning(f"删除目标文件失败: {e}")
             
             # 重命名为最终文件（原子操作）
             os.rename(temp_path, checkpoint_path)
             
-            logger.info(f"成功保存检查点: {checkpoint_path}")
+            # 保存成功後のクリーンアップ
+            del checkpoint_data_cpu
+            gc.collect()
+            
+            logger.info(f"成功保存检查点: {checkpoint_path} (大小: {file_size / (1024**2):.2f} MB)")
             return True
             
         except RuntimeError as e:
             error_msg = str(e)
-            if "file write failed" in error_msg or "unexpected pos" in error_msg:
+            if "file write failed" in error_msg or "unexpected pos" in error_msg or "enforce fail" in error_msg:
                 logger.error(f"保存检查点时发生文件写入错误 (尝试 {attempt + 1}/{max_retries}): {e}")
+                
+                # 临时ファイルをクリーンアップ
+                temp_path = checkpoint_path + ".tmp"
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                
                 if attempt < max_retries - 1:
-                    # 等待一段时间后重试
+                    # 等待一段时间后重试，并尝试不同的保存策略
                     import time
-                    time.sleep(2 ** attempt)  # 指数退避
+                    wait_time = 2 ** attempt
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    
+                    # 最後の試行では、より軽量な保存を試みる（optimizer_state_dictを除外）
+                    if attempt == max_retries - 2:
+                        logger.warning("最后一次重试，将尝试不保存优化器状态以减小文件大小")
+                        current_checkpoint_data = {
+                            k: v for k, v in original_checkpoint_data.items() 
+                            if k != 'optimizer_state_dict'
+                        }
                     continue
                 else:
                     logger.error(f"保存检查点失败，已达到最大重试次数: {checkpoint_path}")
+                    logger.error("建议检查磁盘空间和文件系统状态")
                     return False
             else:
                 # 其他运行时错误直接抛出

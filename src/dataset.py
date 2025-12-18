@@ -203,27 +203,55 @@ class ModelscopeASRDataset(Dataset):
             raw_data = list(self.dataset.skip(idx).take(1))[0]
         
         # 将原始数据转换为模型所需的格式
-        # 尝试多种可能的字段名，以适配不同的数据集格式
+        # 尝试多种可能的字段名，以适配不同的数据集格式（支持大小写不敏感和带冒号的字段名）
         audio_path = None
         text = None
         
-        # 尝试多种音频字段名
-        audio_keys = ['audio', 'audio:FILE', 'audio_file', 'audio_path', 'path', 'file', 'wav', 'wav_file']
+        # 获取所有可用的字段名（转换为小写以便比较）
+        if isinstance(raw_data, dict):
+            available_keys_lower = {k.lower(): k for k in raw_data.keys()}
+        else:
+            available_keys_lower = {}
+        
+        # 尝试多种音频字段名（大小写不敏感）
+        audio_keys = [
+            'audio', 'audio:file', 'audio_file', 'audio_path', 'audio:path',
+            'path', 'file', 'wav', 'wav_file', 'audio:FILE', 'Audio:FILE'
+        ]
         for key in audio_keys:
+            key_lower = key.lower()
+            # 直接匹配
             if key in raw_data and raw_data[key] is not None:
                 audio_path = raw_data[key]
                 break
+            # 大小写不敏感匹配
+            elif key_lower in available_keys_lower:
+                actual_key = available_keys_lower[key_lower]
+                if raw_data[actual_key] is not None:
+                    audio_path = raw_data[actual_key]
+                    break
         
         # 如果 audio_path 是字典，尝试从中提取路径
         if isinstance(audio_path, dict):
             audio_path = audio_path.get('path', None) or audio_path.get('file', None)
         
-        # 尝试多种文本字段名
-        text_keys = ['text', 'sentence', 'transcription', 'transcript', 'label', 'target', 'output']
+        # 尝试多种文本字段名（大小写不敏感）
+        text_keys = [
+            'text', 'sentence', 'transcription', 'transcript', 'label', 
+            'target', 'output', 'text:label', 'Text:LABEL'
+        ]
         for key in text_keys:
+            key_lower = key.lower()
+            # 直接匹配
             if key in raw_data and raw_data[key] is not None:
                 text = raw_data[key]
                 break
+            # 大小写不敏感匹配
+            elif key_lower in available_keys_lower:
+                actual_key = available_keys_lower[key_lower]
+                if raw_data[actual_key] is not None:
+                    text = raw_data[actual_key]
+                    break
         
         # 如果仍然找不到必要字段，记录详细信息并跳过
         if audio_path is None or text is None:

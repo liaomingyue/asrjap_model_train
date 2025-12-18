@@ -357,7 +357,8 @@ class FunASRNano(nn.Module):
             fbank_mask_i = []
             fake_token_len_i = 0
             fbank_beg_i = -1
-            speech, speech_lengths = [], []
+            speech = None  # 初始化为 None，在成功提取特征后更新
+            speech_lengths = None  # 初始化为 None，在成功提取特征后更新
             for k, sub_str in enumerate(splits):
                 if not sub_str.startswith("<|startofspeech|>"):
                     sub_token = tokenizer.encode(sub_str)
@@ -372,43 +373,115 @@ class FunASRNano(nn.Module):
                         if sub_str.startswith("!"):  # !!: audio sample point
                             sub_str = audio
                         
-                        # extract_fbank は内部で load_audio_text_image_video を呼び出すため、
-                        # パス文字列を直接渡す方が安全
-                        # ただし、extract_fbank が正しく動作することを確認する必要がある
+                        # 先使用 load_audio_text_image_video 加载音频数据，然后再使用 frontend 提取特征
+                        # 这样可以避免 extract_fbank 直接将字符串传递给 frontend 的问题
                         try:
                             time1 = time.perf_counter()
-                            # extract_fbank にパス文字列を直接渡す
-                            # extract_fbank は内部で load_audio_text_image_video を呼び出し、
-                            # その後 frontend で特徴抽出を行う
-                            speech, speech_lengths = extract_fbank(
-                                sub_str,  # パス文字列を直接渡す
+                            # 第一步：使用 load_audio_text_image_video 加载音频文件
+                            # 返回的 audio_data 应该是张量格式
+                            audio_data, audio_length = load_audio_text_image_video(
+                                sub_str,  # 音频文件路径
                                 data_type=kwargs.get("data_type", "sound"),
-                                frontend=frontend,
-                                is_final=True,
-                                fs=frontend.fs,  # サンプリングレートを明示的に渡す
+                                fs=frontend.fs if hasattr(frontend, 'fs') else 16000,  # 采样率
                                 **kwargs
-                            )  # speech: [批次大小, 时间帧, 特征维度]
+                            )
                             time2 = time.perf_counter()
                             meta_data["load_data"] = f"{time2 - time1:0.3f}"
                             
-                            # 結果が有効であることを確認
+                            # 检查加载的数据是否有效
+                            if audio_data is None or audio_length is None:
+                                logging.warning(f"音频加载返回空结果，跳过: {sub_str}")
+                                continue
+                            
+                            # 确保 audio_data 是张量格式
+                            if not isinstance(audio_data, torch.Tensor):
+                                # 如果是 numpy 数组，转换为张量
+                                if isinstance(audio_data, np.ndarray):
+                                    audio_data = torch.from_numpy(audio_data)
+                                else:
+                                    logging.error(
+                                        f"load_audio_text_image_video 返回了无效的 audio_data 类型: {type(audio_data)}, "
+                                        f"原始路径: {sub_str}"
+                                    )
+                                    continue
+                            
+                            # 确保 audio_data 是 2D 或 3D 张量 [batch, time] 或 [time]
+                            if len(audio_data.shape) == 1:
+                                # [time] -> [1, time] 添加批次维度
+                                audio_data = audio_data.unsqueeze(0)
+                            elif len(audio_data.shape) == 2:
+                                # [batch, time] 已经是正确格式
+                                pass
+                            else:
+                                logging.error(
+                                    f"audio_data 形状不正确: {audio_data.shape}, "
+                                    f"原始路径: {sub_str}"
+                                )
+                                continue
+                            
+                            # 确保 audio_length 是张量格式
+                            if not isinstance(audio_length, torch.Tensor):
+                                if isinstance(audio_length, (int, np.integer)):
+                                    audio_length = torch.tensor([audio_length], dtype=torch.int64)
+                                elif isinstance(audio_length, (list, tuple)):
+                                    audio_length = torch.tensor(audio_length, dtype=torch.int64)
+                                else:
+                                    logging.error(
+                                        f"audio_length 类型不正确: {type(audio_length)}, "
+                                        f"原始路径: {sub_str}"
+                                    )
+                                    continue
+                            
+                            # 第二步：使用 frontend 提取特征
+                            # frontend 期望输入是张量，而不是字符串
+                            speech, speech_lengths = frontend(
+                                audio_data,
+                                audio_length,
+                                is_final=True,
+                                **kwargs
+                            )
+                            time3 = time.perf_counter()
+                            meta_data["extract_feat"] = f"{time3 - time2:0.3f}"
+                            
+                            # 检查特征提取结果是否有效
                             if speech is None or speech_lengths is None:
                                 logging.warning(f"特征提取返回空结果，跳过: {sub_str}")
                                 continue
                             
-                            # speech がテンソルであることを確認
+                            # 确保 speech 是张量格式
                             if not isinstance(speech, torch.Tensor):
                                 logging.error(
-                                    f"extract_fbank 返回了无效的 speech 类型: {type(speech)}, "
+                                    f"frontend 返回了无效的 speech 类型: {type(speech)}, "
                                     f"原始路径: {sub_str}"
                                 )
                                 continue
+                            
+                            # 计算批次数据时间（在成功提取特征后）
+                            meta_data["batch_data_time"] = (
+                                speech_lengths.sum().item()
+                                * frontend.frame_shift
+                                * frontend.lfr_n
+                                / 1000
+                            )
+                            
+                            # 特征维度置换（如果需要）
+                            if self.feat_permute:
+                                speech = speech.permute(0, 2, 1)
+                            
+                            # 计算输出长度和假token长度
+                            olens = 1 + (speech_lengths[0].item() - 3 + 2 * 1) // 2
+                            olens = 1 + (olens - 3 + 2 * 1) // 2
+                            fake_token_len_i = (olens - 1) // 2 + 1
+                            fake_token = [0] * fake_token_len_i
+                            fbank_beg_i = len(source_ids)
+                            source_ids += fake_token
+                            fbank_mask_i += [1] * len(fake_token)
                                 
                         except AttributeError as e:
                             # 'str' object has no attribute 'size' などのエラーをキャッチ
                             if "'str' object" in str(e) or "has no attribute" in str(e):
                                 logging.error(
-                                    f"extract_fbank 内部错误: {str(e)}, "
+                                    f"特征提取内部错误: {str(e)}, "
                                     f"原始路径: {sub_str}, "
                                     f"错误详情: {traceback.format_exc()}"
                                 )
@@ -426,26 +499,6 @@ class FunASRNano(nn.Module):
                             # エラーが発生した場合、スキップ
                             continue
 
-                        time3 = time.perf_counter()
-                        meta_data["extract_feat"] = f"{time3 - time2:0.3f}"
-                        meta_data["batch_data_time"] = (
-                            speech_lengths.sum().item()
-                            * frontend.frame_shift
-                            * frontend.lfr_n
-                            / 1000
-                        )
-
-                        if self.feat_permute:
-                            speech = speech.permute(0, 2, 1)
-
-                        olens = 1 + (speech_lengths[0].item() - 3 + 2 * 1) // 2
-                        olens = 1 + (olens - 3 + 2 * 1) // 2
-                        fake_token_len_i = (olens - 1) // 2 + 1
-                        fake_token = [0] * fake_token_len_i
-                        fbank_beg_i = len(source_ids)
-                        source_ids += fake_token
-                        fbank_mask_i += [1] * len(fake_token)
-
             fbank_beg += [fbank_beg_i + len(input_ids)]
             fake_token_len += [fake_token_len_i]
             source_mask = [-100] * len(source_ids)
@@ -455,9 +508,15 @@ class FunASRNano(nn.Module):
             input_ids += source_ids + target_ids
             labels += source_mask + target_ids
             fbank_mask += fbank_mask_i
-            if len(speech) > 0:
-                fbank.append(speech[0, :, :])
-                fbank_lens.append(speech_lengths)
+            # 如果成功提取了特征，添加到 fbank 列表中
+            if speech is not None and speech_lengths is not None:
+                # speech 是张量，需要提取第一个批次的数据
+                if isinstance(speech, torch.Tensor):
+                    if len(speech.shape) >= 2:
+                        fbank.append(speech[0, :, :] if len(speech.shape) == 3 else speech[0, :])
+                    else:
+                        fbank.append(speech)
+                    fbank_lens.append(speech_lengths)
 
         input_ids = torch.tensor(
             input_ids, dtype=torch.int64

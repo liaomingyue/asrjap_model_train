@@ -7,6 +7,7 @@ import string
 import time
 import traceback
 
+import numpy as np
 import torch
 import torch.nn as nn
 from funasr import AutoModel
@@ -370,41 +371,54 @@ class FunASRNano(nn.Module):
                         sub_str = sub_str[1:]
                         if sub_str.startswith("!"):  # !!: audio sample point
                             sub_str = audio
-                        data_src = None
+                        
+                        # extract_fbank は内部で load_audio_text_image_video を呼び出すため、
+                        # パス文字列を直接渡す方が安全
+                        # ただし、extract_fbank が正しく動作することを確認する必要がある
                         try:
                             time1 = time.perf_counter()
-                            data_src = load_audio_text_image_video(
-                                sub_str, fs=frontend.fs, **kwargs
-                            )
-                            time2 = time.perf_counter()
-                            meta_data["load_data"] = f"{time2 - time1:0.3f}"
-                        except Exception as e:
-                            logging.error(
-                                f"加载音频文件失败! 路径: {sub_str}, 错误: {str(e)}, {traceback.format_exc()}"
-                            )
-                            # エラーが発生した場合、スキップ
-                            continue
-                        
-                        # data_src が正しく設定されているか確認
-                        if data_src is None:
-                            logging.warning(f"音频数据加载失败，跳过: {sub_str}")
-                            continue
-                        
-                        # data_src が文字列の場合、エラー
-                        if isinstance(data_src, str):
-                            logging.error(
-                                f"load_audio_text_image_video 返回了字符串而不是音频数据: {data_src}, "
-                                f"原始路径: {sub_str}"
-                            )
-                            continue
-                        
-                        try:
+                            # extract_fbank にパス文字列を直接渡す
+                            # extract_fbank は内部で load_audio_text_image_video を呼び出し、
+                            # その後 frontend で特徴抽出を行う
                             speech, speech_lengths = extract_fbank(
-                                data_src,
+                                sub_str,  # パス文字列を直接渡す
                                 data_type=kwargs.get("data_type", "sound"),
                                 frontend=frontend,
                                 is_final=True,
+                                fs=frontend.fs,  # サンプリングレートを明示的に渡す
+                                **kwargs
                             )  # speech: [批次大小, 时间帧, 特征维度]
+                            time2 = time.perf_counter()
+                            meta_data["load_data"] = f"{time2 - time1:0.3f}"
+                            
+                            # 結果が有効であることを確認
+                            if speech is None or speech_lengths is None:
+                                logging.warning(f"特征提取返回空结果，跳过: {sub_str}")
+                                continue
+                            
+                            # speech がテンソルであることを確認
+                            if not isinstance(speech, torch.Tensor):
+                                logging.error(
+                                    f"extract_fbank 返回了无效的 speech 类型: {type(speech)}, "
+                                    f"原始路径: {sub_str}"
+                                )
+                                continue
+                                
+                        except AttributeError as e:
+                            # 'str' object has no attribute 'size' などのエラーをキャッチ
+                            if "'str' object" in str(e) or "has no attribute" in str(e):
+                                logging.error(
+                                    f"extract_fbank 内部错误: {str(e)}, "
+                                    f"原始路径: {sub_str}, "
+                                    f"错误详情: {traceback.format_exc()}"
+                                )
+                                # エラーが発生した場合、スキップ
+                                continue
+                            else:
+                                logging.error(
+                                    f"提取特征失败! 路径: {sub_str}, 错误: {str(e)}, {traceback.format_exc()}"
+                                )
+                                continue
                         except Exception as e:
                             logging.error(
                                 f"提取特征失败! 路径: {sub_str}, 错误: {str(e)}, {traceback.format_exc()}"

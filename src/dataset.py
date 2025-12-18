@@ -7,7 +7,59 @@ import logging
 from typing import Dict, List, Optional, Union
 import torch
 from torch.utils.data import Dataset, DataLoader
-from modelscope.msdatasets import MsDataset
+
+# 延迟导入：MsDataset 在实际使用时才进行导入，避免模块加载时的版本冲突
+_MsDataset = None
+
+def _get_msdataset():
+    """
+    延迟导入 MsDataset 的辅助函数
+    
+    此函数在实际需要使用 MsDataset 时才进行导入，避免在模块加载时
+    就触发 modelscope 和 datasets 库的版本冲突问题。
+    
+    Returns:
+        MsDataset 类
+        
+    Raises:
+        ImportError: 当 modelscope 或 datasets 库版本不兼容时抛出
+    """
+    global _MsDataset
+    if _MsDataset is None:
+        try:
+            from modelscope.msdatasets import MsDataset
+            _MsDataset = MsDataset
+        except ImportError as e:
+            # 检查具体的错误类型，提供更详细的解决方案
+            error_detail = str(e)
+            if "HubDatasetModuleFactoryWithoutScript" in error_detail or "cannot import name" in error_detail:
+                error_msg = (
+                    f"modelscope.msdatasets.MsDataset 导入失败: {e}\n"
+                    "这通常是由于 modelscope 和 datasets 库的版本不兼容导致的。\n"
+                    "请尝试以下解决方案之一：\n"
+                    "\n"
+                    "方案 1（推荐）：安装兼容的旧版本\n"
+                    "  pip install 'datasets<3.0.0' 'modelscope>=1.9.0'\n"
+                    "\n"
+                    "方案 2：安装兼容的新版本\n"
+                    "  pip install 'datasets>=2.14.0' 'modelscope>=1.15.0'\n"
+                    "\n"
+                    "方案 3：重新安装兼容版本组合\n"
+                    "  pip uninstall modelscope datasets -y\n"
+                    "  pip install 'datasets==2.14.7' 'modelscope==1.15.0'\n"
+                    "\n"
+                    "如果问题仍然存在，请检查当前安装的版本：\n"
+                    "  pip show modelscope datasets"
+                )
+            else:
+                error_msg = (
+                    f"modelscope.msdatasets.MsDataset 导入失败: {e}\n"
+                    "请确保已正确安装 modelscope 库：\n"
+                    "  pip install modelscope"
+                )
+            logging.error(error_msg)
+            raise ImportError(error_msg) from e
+    return _MsDataset
 
 
 class ModelscopeASRDataset(Dataset):
@@ -51,6 +103,7 @@ class ModelscopeASRDataset(Dataset):
         
         # 加载数据集
         logging.info(f"正在加载数据集: {dataset_name}, 子集: {subset_name}, 分割: {split}")
+        MsDataset = _get_msdataset()  # 延迟导入，避免版本冲突
         self.dataset = MsDataset.load(
             dataset_name,
             subset_name=subset_name,

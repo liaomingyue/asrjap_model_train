@@ -472,18 +472,235 @@ class ModelscopeASRDataset(Dataset):
             speech = []
             speech_lengths = []
         
-        # 合并其他张量
+        # 合并其他张量（トークン長が異なるため、パディングが必要）
+        try:
+            # 各テンソルの形状を確認し、最大長に合わせてパディング
+            # fbank_mask, input_ids, attention_mask, labels_ids, source_ids, target_ids はトークン長が異なる可能性がある
+            
+            # fbank_mask の処理
+            fbank_masks = [b["fbank_mask"] for b in batch]
+            if len(fbank_masks) > 0:
+                # 形状を確認: 通常は [1, トークン長]
+                max_fbank_mask_len = max(m.shape[-1] if len(m.shape) > 1 else len(m) for m in fbank_masks)
+                padded_fbank_masks = []
+                for m in fbank_masks:
+                    if len(m.shape) == 2:
+                        # [1, トークン長] の形状
+                        if m.shape[1] < max_fbank_mask_len:
+                            padding = torch.zeros(1, max_fbank_mask_len - m.shape[1], dtype=m.dtype, device=m.device)
+                            m = torch.cat([m, padding], dim=1)
+                        padded_fbank_masks.append(m)
+                    elif len(m.shape) == 1:
+                        # [トークン長] の形状
+                        if m.shape[0] < max_fbank_mask_len:
+                            padding = torch.zeros(max_fbank_mask_len - m.shape[0], dtype=m.dtype, device=m.device)
+                            m = torch.cat([m, padding], dim=0)
+                        padded_fbank_masks.append(m[None, :])  # [1, トークン長] に変換
+                    else:
+                        padded_fbank_masks.append(m)
+                fbank_mask = torch.cat(padded_fbank_masks, dim=0)
+            else:
+                fbank_mask = torch.tensor([], dtype=torch.float32)
+            
+            # input_ids の処理
+            input_ids_list = [b["input_ids"] for b in batch]
+            if len(input_ids_list) > 0:
+                max_input_ids_len = max(ids.shape[-1] if len(ids.shape) > 1 else len(ids) for ids in input_ids_list)
+                padded_input_ids = []
+                for ids in input_ids_list:
+                    if len(ids.shape) == 2:
+                        # [1, トークン長] の形状
+                        if ids.shape[1] < max_input_ids_len:
+                            padding = torch.zeros(1, max_input_ids_len - ids.shape[1], dtype=ids.dtype, device=ids.device)
+                            ids = torch.cat([ids, padding], dim=1)
+                        padded_input_ids.append(ids)
+                    elif len(ids.shape) == 1:
+                        # [トークン長] の形状
+                        if ids.shape[0] < max_input_ids_len:
+                            padding = torch.zeros(max_input_ids_len - ids.shape[0], dtype=ids.dtype, device=ids.device)
+                            ids = torch.cat([ids, padding], dim=0)
+                        padded_input_ids.append(ids[None, :])  # [1, トークン長] に変換
+                    else:
+                        padded_input_ids.append(ids)
+                input_ids = torch.cat(padded_input_ids, dim=0)
+            else:
+                input_ids = torch.tensor([], dtype=torch.int64)
+            
+            # attention_mask の処理
+            attention_masks = [b["attention_mask"] for b in batch]
+            if len(attention_masks) > 0:
+                max_attention_mask_len = max(m.shape[-1] if len(m.shape) > 1 else len(m) for m in attention_masks)
+                padded_attention_masks = []
+                for m in attention_masks:
+                    if len(m.shape) == 2:
+                        # [1, トークン長] の形状
+                        if m.shape[1] < max_attention_mask_len:
+                            padding = torch.zeros(1, max_attention_mask_len - m.shape[1], dtype=m.dtype, device=m.device)
+                            m = torch.cat([m, padding], dim=1)
+                        padded_attention_masks.append(m)
+                    elif len(m.shape) == 1:
+                        # [トークン長] の形状
+                        if m.shape[0] < max_attention_mask_len:
+                            padding = torch.zeros(max_attention_mask_len - m.shape[0], dtype=m.dtype, device=m.device)
+                            m = torch.cat([m, padding], dim=0)
+                        padded_attention_masks.append(m[None, :])  # [1, トークン長] に変換
+                    else:
+                        padded_attention_masks.append(m)
+                attention_mask = torch.cat(padded_attention_masks, dim=0)
+            else:
+                attention_mask = torch.tensor([], dtype=torch.int32)
+            
+            # labels_ids の処理（パディング値は -100）
+            labels_ids_list = [b["labels_ids"] for b in batch]
+            if len(labels_ids_list) > 0:
+                max_labels_ids_len = max(labels.shape[-1] if len(labels.shape) > 1 else len(labels) for labels in labels_ids_list)
+                padded_labels_ids = []
+                for labels in labels_ids_list:
+                    if len(labels.shape) == 2:
+                        # [1, トークン長] の形状
+                        if labels.shape[1] < max_labels_ids_len:
+                            padding = torch.full((1, max_labels_ids_len - labels.shape[1]), -100, dtype=labels.dtype, device=labels.device)
+                            labels = torch.cat([labels, padding], dim=1)
+                        padded_labels_ids.append(labels)
+                    elif len(labels.shape) == 1:
+                        # [トークン長] の形状
+                        if labels.shape[0] < max_labels_ids_len:
+                            padding = torch.full((max_labels_ids_len - labels.shape[0],), -100, dtype=labels.dtype, device=labels.device)
+                            labels = torch.cat([labels, padding], dim=0)
+                        padded_labels_ids.append(labels[None, :])  # [1, トークン長] に変換
+                    else:
+                        padded_labels_ids.append(labels)
+                labels_ids = torch.cat(padded_labels_ids, dim=0)
+            else:
+                labels_ids = torch.tensor([], dtype=torch.int64)
+            
+            # source_ids の処理
+            source_ids_list = [b["source_ids"] for b in batch]
+            if len(source_ids_list) > 0:
+                max_source_ids_len = max(ids.shape[-1] if len(ids.shape) > 1 else len(ids) for ids in source_ids_list)
+                padded_source_ids = []
+                for ids in source_ids_list:
+                    if len(ids.shape) == 2:
+                        # [1, トークン長] の形状
+                        if ids.shape[1] < max_source_ids_len:
+                            padding = torch.zeros(1, max_source_ids_len - ids.shape[1], dtype=ids.dtype, device=ids.device)
+                            ids = torch.cat([ids, padding], dim=1)
+                        padded_source_ids.append(ids)
+                    elif len(ids.shape) == 1:
+                        # [トークン長] の形状
+                        if ids.shape[0] < max_source_ids_len:
+                            padding = torch.zeros(max_source_ids_len - ids.shape[0], dtype=ids.dtype, device=ids.device)
+                            ids = torch.cat([ids, padding], dim=0)
+                        padded_source_ids.append(ids[None, :])  # [1, トークン長] に変換
+                    else:
+                        padded_source_ids.append(ids)
+                source_ids = torch.cat(padded_source_ids, dim=0)
+            else:
+                source_ids = torch.tensor([], dtype=torch.int64)
+            
+            # target_ids の処理
+            target_ids_list = [b["target_ids"] for b in batch]
+            if len(target_ids_list) > 0:
+                max_target_ids_len = max(ids.shape[-1] if len(ids.shape) > 1 else len(ids) for ids in target_ids_list)
+                padded_target_ids = []
+                for ids in target_ids_list:
+                    if len(ids.shape) == 2:
+                        # [1, トークン長] の形状
+                        if ids.shape[1] < max_target_ids_len:
+                            padding = torch.zeros(1, max_target_ids_len - ids.shape[1], dtype=ids.dtype, device=ids.device)
+                            ids = torch.cat([ids, padding], dim=1)
+                        padded_target_ids.append(ids)
+                    elif len(ids.shape) == 1:
+                        # [トークン長] の形状
+                        if ids.shape[0] < max_target_ids_len:
+                            padding = torch.zeros(max_target_ids_len - ids.shape[0], dtype=ids.dtype, device=ids.device)
+                            ids = torch.cat([ids, padding], dim=0)
+                        padded_target_ids.append(ids[None, :])  # [1, トークン長] に変換
+                    else:
+                        padded_target_ids.append(ids)
+                target_ids = torch.cat(padded_target_ids, dim=0)
+            else:
+                target_ids = torch.tensor([], dtype=torch.int64)
+            
+            # fbank_beg と fake_token_len の処理（これらは通常同じ形状を持つ）
+            fbank_begs = [b["fbank_beg"] for b in batch]
+            fake_token_lens = [b["fake_token_len"] for b in batch]
+            
+            # fbank_beg の形状を確認して結合
+            if len(fbank_begs) > 0:
+                # 形状を統一
+                fbank_begs_processed = []
+                for beg in fbank_begs:
+                    if len(beg.shape) == 0:
+                        # スカラー
+                        fbank_begs_processed.append(beg[None, None])
+                    elif len(beg.shape) == 1:
+                        # [長さ] の形状
+                        fbank_begs_processed.append(beg[None, :])
+                    else:
+                        # すでに [1, 長さ] の形状
+                        fbank_begs_processed.append(beg)
+                
+                # 最大長に合わせてパディング
+                max_fbank_beg_len = max(b.shape[-1] for b in fbank_begs_processed)
+                padded_fbank_begs = []
+                for beg in fbank_begs_processed:
+                    if beg.shape[1] < max_fbank_beg_len:
+                        padding = torch.zeros(1, max_fbank_beg_len - beg.shape[1], dtype=beg.dtype, device=beg.device)
+                        beg = torch.cat([beg, padding], dim=1)
+                    padded_fbank_begs.append(beg)
+                fbank_beg = torch.cat(padded_fbank_begs, dim=0)
+            else:
+                fbank_beg = torch.tensor([], dtype=torch.int32)
+            
+            # fake_token_len の処理
+            if len(fake_token_lens) > 0:
+                # 形状を統一
+                fake_token_lens_processed = []
+                for flen in fake_token_lens:
+                    if len(flen.shape) == 0:
+                        # スカラー
+                        fake_token_lens_processed.append(flen[None, None])
+                    elif len(flen.shape) == 1:
+                        # [長さ] の形状
+                        fake_token_lens_processed.append(flen[None, :])
+                    else:
+                        # すでに [1, 長さ] の形状
+                        fake_token_lens_processed.append(flen)
+                
+                # 最大長に合わせてパディング
+                max_fake_token_len = max(flen.shape[-1] for flen in fake_token_lens_processed)
+                padded_fake_token_lens = []
+                for flen in fake_token_lens_processed:
+                    if flen.shape[1] < max_fake_token_len:
+                        padding = torch.zeros(1, max_fake_token_len - flen.shape[1], dtype=flen.dtype, device=flen.device)
+                        flen = torch.cat([flen, padding], dim=1)
+                    padded_fake_token_lens.append(flen)
+                fake_token_len = torch.cat(padded_fake_token_lens, dim=0)
+            else:
+                fake_token_len = torch.tensor([], dtype=torch.int32)
+            
+        except Exception as e:
+            logging.error(f"合并张量时发生错误: {e}")
+            logging.error(f"批次大小: {len(batch)}")
+            if len(batch) > 0:
+                logging.error(f"第一个样本的键: {list(batch[0].keys())}")
+                for key in batch[0].keys():
+                    if isinstance(batch[0][key], torch.Tensor):
+                        logging.error(f"  {key}: {batch[0][key].shape}")
+            raise
+        
         merged = {
             "speech": speech,
             "speech_lengths": speech_lengths,
-            "fbank_mask": torch.cat([b["fbank_mask"] for b in batch], dim=0),
-            "fbank_beg": torch.cat([b["fbank_beg"] for b in batch], dim=0),
-            "fake_token_len": torch.cat([b["fake_token_len"] for b in batch], dim=0),
-            "input_ids": torch.cat([b["input_ids"] for b in batch], dim=0),
-            "attention_mask": torch.cat([b["attention_mask"] for b in batch], dim=0),
-            "labels_ids": torch.cat([b["labels_ids"] for b in batch], dim=0),
-            "source_ids": torch.cat([b["source_ids"] for b in batch], dim=0),
-            "target_ids": torch.cat([b["target_ids"] for b in batch], dim=0),
+            "fbank_mask": fbank_mask,
+            "fbank_beg": fbank_beg,
+            "fake_token_len": fake_token_len,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels_ids": labels_ids,
+            "source_ids": source_ids,
+            "target_ids": target_ids,
         }
         
         return merged

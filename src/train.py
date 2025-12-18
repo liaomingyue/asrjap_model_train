@@ -243,8 +243,20 @@ def train_epoch(
         
         # 损失が勾配を必要とすることを確認
         if not loss.requires_grad:
-            logger.warning(f"批次 {batch_idx}: 损失テンソルが勾配を必要としません。requires_grad={loss.requires_grad}, grad_fn={loss.grad_fn}")
+            # 最初の数回のみ詳細な警告を出力
+            if batch_idx < 3:
+                logger.warning(
+                    f"批次 {batch_idx}: 损失テンソルが勾配を必要としません。"
+                    f"requires_grad={loss.requires_grad}, grad_fn={loss.grad_fn}\n"
+                    f"これは通常、モデルのパラメータがすべて凍結されているか、"
+                    f"損失計算の過程で勾配が失われていることを示しています。"
+                )
             # 損失が勾配を必要としない場合、スキップ
+            # ただし、統計情報は記録する
+            if stats is not None:
+                total_loss += stats.get("loss", 0.0).item() * weight.item()
+                total_acc += stats.get("acc", 0.0) * weight.item()
+                num_batches += weight.item()
             continue
         
         # 梯度累积
@@ -404,6 +416,20 @@ def main():
     
     if tokenizer is None or frontend is None:
         logger.warning("未找到 tokenizer 或 frontend，将使用默认配置")
+    
+    # 检查模型是否有可训练参数
+    trainable_params = sum(p.numel() for p in model_module.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model_module.parameters())
+    logger.info(f"模型参数统计: 总参数={total_params:,}, 可训练参数={trainable_params:,}")
+    
+    if trainable_params == 0:
+        logger.warning(
+            "警告: 模型没有可训练参数！所有参数都被冻结了。\n"
+            "如果使用 LoRA 进行微调，请确保配置文件中 'use_lora: True' 和 'freeze_lora: False'。\n"
+            "训练将无法更新模型参数。"
+        )
+    else:
+        logger.info(f"模型有 {trainable_params:,} 个可训练参数，可以进行训练")
     
     # 从 kwargs 中移除已明确传递的参数，避免重复参数错误
     dataset_kwargs = {k: v for k, v in kwargs.items() 

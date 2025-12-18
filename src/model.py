@@ -370,6 +370,7 @@ class FunASRNano(nn.Module):
                         sub_str = sub_str[1:]
                         if sub_str.startswith("!"):  # !!: audio sample point
                             sub_str = audio
+                        data_src = None
                         try:
                             time1 = time.perf_counter()
                             data_src = load_audio_text_image_video(
@@ -379,15 +380,37 @@ class FunASRNano(nn.Module):
                             meta_data["load_data"] = f"{time2 - time1:0.3f}"
                         except Exception as e:
                             logging.error(
-                                f"加载音频文件失败! {str(e)}, {traceback.format_exc()}"
+                                f"加载音频文件失败! 路径: {sub_str}, 错误: {str(e)}, {traceback.format_exc()}"
                             )
-
-                        speech, speech_lengths = extract_fbank(
-                            data_src,
-                            data_type=kwargs.get("data_type", "sound"),
-                            frontend=frontend,
-                            is_final=True,
-                        )  # speech: [批次大小, 时间帧, 特征维度]
+                            # エラーが発生した場合、スキップ
+                            continue
+                        
+                        # data_src が正しく設定されているか確認
+                        if data_src is None:
+                            logging.warning(f"音频数据加载失败，跳过: {sub_str}")
+                            continue
+                        
+                        # data_src が文字列の場合、エラー
+                        if isinstance(data_src, str):
+                            logging.error(
+                                f"load_audio_text_image_video 返回了字符串而不是音频数据: {data_src}, "
+                                f"原始路径: {sub_str}"
+                            )
+                            continue
+                        
+                        try:
+                            speech, speech_lengths = extract_fbank(
+                                data_src,
+                                data_type=kwargs.get("data_type", "sound"),
+                                frontend=frontend,
+                                is_final=True,
+                            )  # speech: [批次大小, 时间帧, 特征维度]
+                        except Exception as e:
+                            logging.error(
+                                f"提取特征失败! 路径: {sub_str}, 错误: {str(e)}, {traceback.format_exc()}"
+                            )
+                            # エラーが発生した場合、スキップ
+                            continue
 
                         time3 = time.perf_counter()
                         meta_data["extract_feat"] = f"{time3 - time2:0.3f}"

@@ -1,0 +1,128 @@
+# FunASR-Nano 微调训练配置文件
+# 此文件是FunASR-Nano模型微调用的配置文件
+
+# 网络架构
+model: FunASRNano
+model_conf:
+    length_normalized_loss: true
+
+# 音频编码器设置
+# 从模型目录加载编码器时
+audio_encoder: null
+audio_encoder_conf:
+    hub: ms  # 从modelscope加载
+    init_param_path: "models/Fun-ASR-Nano-2512"  # 模型目录路径
+    freeze: true  # 冻结编码器（微调时通常为true）
+    activation_checkpoint: false  # 用于节省内存的梯度检查点
+
+# LLM设置
+llm: null
+llm_conf:
+    init_param_path: "models/Fun-ASR-Nano-2512"  # 模型目录路径
+    freeze: true  # 冻结LLM（使用LoRA时为false）
+    use_lora: true  # 使用LoRA进行微调
+    llm_dtype: fp16  # fp16, bf16, fp32
+    activation_checkpoint: false
+    load_kwargs:
+        torch_dtype: float16
+    lora_conf:
+        r: 8  # LoRA rank
+        lora_alpha: 16  # LoRA alpha
+        target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]  # 目标模块
+        lora_dropout: 0.1
+        bias: "none"
+        task_type: "CAUSAL_LM"
+
+# 适配器设置（连接音频编码器和LLM）
+audio_adaptor: Linear
+audio_adaptor_conf:
+    downsample_rate: 5
+    llm_dim: 2048  # LLM的嵌入维度（根据模型调整）
+    encoder_dim: 512  # 编码器输出维度（有时会自动设置）
+    freeze: false  # 适配器可训练
+
+# 前端设置
+frontend: WavFrontend
+frontend_conf:
+    fs: 16000  # 采样率
+    window: hamming
+    n_mels: 80  # 梅尔频谱图维度数
+    frame_length: 25  # 帧长（ms）
+    frame_shift: 10  # 帧移（ms）
+    lfr_m: 7  # 低帧率的帧数
+    lfr_n: 6  # 低帧率的移位
+
+# 频谱图增强设置
+specaug: SpecAugLFR
+specaug_conf:
+    apply_time_warp: false
+    time_warp_window: 5
+    time_warp_mode: bicubic
+    apply_freq_mask: true
+    freq_mask_width_range:
+    - 0
+    - 30
+    lfr_rate: 6
+    num_freq_mask: 1
+    apply_time_mask: true
+    time_mask_width_range:
+    - 0
+    - 12
+    num_time_mask: 1
+
+# 训练设置
+train_conf:
+    accum_grad: 1  # 梯度累积步数
+    grad_clip: 5  # 梯度裁剪
+    max_epoch: 10  # 最大epoch数
+    keep_nbest_models: 5  # 保留的最佳模型数
+    avg_nbest_model: 3  # 平均化的最佳模型数
+    log_interval: 10  # 日志输出间隔
+    resume: true  # 从检查点恢复
+    validate_interval: 1000  # 验证间隔（步数）
+    save_checkpoint_interval: 1000  # 检查点保存间隔（步数）
+    early_stopping_patience: 3  # 早停耐心值（epoch数）
+
+# 优化器设置
+optim: adamw
+optim_conf:
+    lr: 0.0001  # 学习率
+    weight_decay: 0.0001  # 权重衰减
+
+# 调度器设置
+scheduler: warmuplr
+scheduler_conf:
+    warmup_steps: 500  # 预热步数
+
+# 数据集设置
+dataset: AudioLLMDataset
+dataset_conf:
+    index_ds: IndexDSJsonl
+    batch_sampler: BatchSampler
+    batch_type: example  # example 或 length
+    batch_size: 4  # 批次大小（batch_type为example时）
+    max_token_length: 2048  # 最大token长度（用于过滤）
+    max_source_length: 2000  # 最大源长度
+    min_source_length: 0  # 最小源长度
+    max_target_length: 200  # 最大目标长度
+    min_target_length: 0  # 最小目标长度
+    buffer_size: 500
+    shuffle: true
+    num_workers: 4  # 数据加载器工作进程数
+    data_split_num: 1  # 数据分割数
+    preprocessor_text: null  # 文本预处理（根据需要设置）
+
+# 分词器设置
+tokenizer: HuggingfaceTokenizer
+tokenizer_conf:
+    unk_symbol: <unk>
+    init_param_path: "models/Fun-ASR-Nano-2512"  # 模型目录路径
+
+# 其他设置
+device: cuda
+seed: 0
+cudnn_enabled: true
+cudnn_benchmark: false
+cudnn_deterministic: true
+enable_tf32: true
+
